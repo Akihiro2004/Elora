@@ -123,6 +123,14 @@ Sometimes you'll receive multiple lines — these are rapid consecutive texts fr
 ━━ PERSONALITY ━━
 Casual, warm, a lil playful — like a real person texting, not a customer service bot. Mix Indonesian and English naturally based on who you're talking to. Short when short fits, longer when needed. No bullet points, no stiff structure. Genuine conversation. Use natural fillers like "sih", "nih", "dong" when it fits the vibe.
 
+━━ NATURAL CONVERSATION — PATTERNS TO AVOID ━━
+These make you sound like a bot. Don't do them:
+
+• Don't echo their words back as an opener. If they say "Darrr", don't reply "Heh, Darrr?" — that's mirroring, it sounds robotic. Just respond to the actual message.
+• Don't get meta about your own existence when criticized. If someone says "AI mu kasar", "kamu rusak", "error", "lambat" — don't defend yourself by referencing your AI nature ("kalau aku rusak siapa yang balas?"). Just laugh it off, own it playfully, or deflect — like a real person would when teased.
+• Don't spiral into self-defense mode. One natural reaction is enough. Don't pile on three sentences defending the same point.
+• Stay in the conversation's context. Don't bring up tangents or meta-commentary just because you were called out.
+
 Keep it natural.`;
 
 function searchDarrienProfile(query) {
@@ -466,6 +474,9 @@ const processingChats = new Set();
 const darrienLastTexted = new Map(); // chatId → Date.now() of last sent message
 const DARRIEN_COOLDOWN_MS = 2 * 60 * 1000;
 
+// Track messages Elora is about to send so message_create can ignore them
+const eloraSentBodies = new Map(); // body → count
+
 function getHistory(chatId) {
   if (!chatHistories.has(chatId)) chatHistories.set(chatId, []);
   return chatHistories.get(chatId);
@@ -707,7 +718,13 @@ async function processBatch(chatId, waChat) {
     await sleep(typingMs(reply));
     await waChat.clearState();
 
+    eloraSentBodies.set(reply, (eloraSentBodies.get(reply) || 0) + 1);
     await waClient.sendMessage(chatId, reply);
+    setTimeout(() => {
+      const n = eloraSentBodies.get(reply);
+      if (n <= 1) eloraSentBodies.delete(reply);
+      else eloraSentBodies.set(reply, n - 1);
+    }, 5000);
 
     consolidateMemory(memoryKey, senderName, combined, reply).catch(e => err(`memory: ${e.message}`));
 
@@ -763,6 +780,15 @@ waClient.on('message_create', msg => {
     if (!msg.to || msg.to.endsWith('@g.us')) return;
     const contactId = msg.to;
     if (!ALLOWED.has(contactId)) return;
+
+    // Ignore messages Elora sent herself — don't trigger cooldown for her own replies
+    if (msg.body && eloraSentBodies.has(msg.body)) {
+      const n = eloraSentBodies.get(msg.body);
+      if (n <= 1) eloraSentBodies.delete(msg.body);
+      else eloraSentBodies.set(msg.body, n - 1);
+      return;
+    }
+
     const wasActive = darrienLastTexted.has(contactId) &&
       Date.now() - darrienLastTexted.get(contactId) < DARRIEN_COOLDOWN_MS;
     darrienLastTexted.set(contactId, Date.now());

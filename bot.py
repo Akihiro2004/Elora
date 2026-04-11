@@ -78,7 +78,10 @@ def save_memory(phone_key: str, content: str) -> None:
         content = " ".join(words[:250])
     capped = content.strip()
     def _write():
-        mem_path(phone_key).write_text(capped, encoding="utf-8")
+        try:
+            mem_path(phone_key).write_text(capped, encoding="utf-8")
+        except Exception as e:
+            log_err(f"memory write error: {e}")
     threading.Thread(target=_write, daemon=True).start()
 
 
@@ -309,6 +312,14 @@ Multiple lines = rapid texts from the same person. Read as one thought, reply on
 ━━ PERSONALITY ━━
 Casual, warm, a lil playful — like a real person texting, not a customer service bot. Mix Indonesian and English naturally based on who you're talking to. Short when short fits, longer when needed. No bullet points, no stiff structure. Genuine conversation. Use natural fillers like "sih", "nih", "dong" when it fits the vibe.
 
+━━ NATURAL CONVERSATION — PATTERNS TO AVOID ━━
+These make you sound like a bot. Don't do them:
+
+• Don't echo their words back as an opener. If they say "Darrr", don't reply "Heh, Darrr?" — that's mirroring, it sounds robotic. Just respond to the actual message.
+• Don't get meta about your own existence when criticized. If someone says "AI mu kasar", "kamu rusak", "error", "lambat" — don't defend yourself by referencing your AI nature ("kalau aku rusak siapa yang balas?"). Just laugh it off, own it playfully, or deflect — like a real person would when teased.
+• Don't spiral into self-defense mode. One natural reaction is enough. Don't pile on three sentences defending the same point.
+• Stay in the conversation's context. Don't bring up tangents or meta-commentary just because you were called out.
+
 Keep it natural."""
 
 
@@ -511,6 +522,9 @@ _pending_phone_key: dict[int, str] = {}
 # Cooldown: when Darrien texts a contact, suppress Elora's replies for 2 min
 _darrien_last_texted: dict[int, float] = {}  # chat_id → monotonic time
 DARRIEN_COOLDOWN_S = 120
+
+# Track messages Elora is about to send so on_outgoing can ignore them
+_elora_sent_bodies: dict[str, int] = {}  # body → count
 
 _URL_RE = re.compile(r'^(https?://|www\.)\S+$', re.IGNORECASE)
 
@@ -737,7 +751,13 @@ async def _process_batch(chat_id: int) -> None:
         log_send(f"[TG] Elora → {_c('1', sender)}: {reply[:80]!r}")
         async with client.action(chat_id, "typing"):
             await asyncio.sleep(_typing_seconds(reply))
+        _elora_sent_bodies[reply] = _elora_sent_bodies.get(reply, 0) + 1
         await client.send_message(chat_id, reply)
+        def _cleanup_sent(body=reply):
+            n = _elora_sent_bodies.get(body, 0)
+            if n <= 1: _elora_sent_bodies.pop(body, None)
+            else: _elora_sent_bodies[body] = n - 1
+        asyncio.get_event_loop().call_later(5, _cleanup_sent)
 
         asyncio.create_task(_schedule_memory_consolidation(phone_key, sender, combined, reply))
 
@@ -820,6 +840,10 @@ async def on_outgoing(event):
         _replied_chats.discard(event.chat_id)
     # Track when Darrien personally messages an allowed contact
     if event.is_private and event.chat_id in _allowed_ids:
+        # Ignore messages Elora sent herself — don't trigger cooldown for her own replies
+        body = event.message.text or ""
+        if body and body in _elora_sent_bodies:
+            return  # _cleanup_sent scheduled at send time handles decrement
         was_active = (
             event.chat_id in _darrien_last_texted and
             _time.monotonic() - _darrien_last_texted[event.chat_id] < DARRIEN_COOLDOWN_S
