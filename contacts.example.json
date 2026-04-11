@@ -1,0 +1,9 @@
+{
+  "contacts": [
+    "+620123456789",
+    "+620123456789"
+  ],
+  "batch_window_seconds": 4,
+  "max_history_turns": 5,
+  "reply_once_per_conversation": false
+}

@@ -1,0 +1,13 @@
+{
+  "contacts": [
+    "+6281317748648",
+    "+6285692192710",
+    "+6285717868001",
+    "+639559805821",
+    "+6285822395887",
+    "+6287882228360"
+  ],
+  "batch_window_seconds": 4,
+  "max_history_turns": 5,
+  "reply_once_per_conversation": false
+}

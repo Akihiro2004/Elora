@@ -1,0 +1,12 @@
+{
+  "name": "elora-whatsapp",
+  "version": "1.0.0",
+  "description": "Elora — Darrien's WhatsApp AI assistant",
+  "main": "whatsapp_bot.js",
+  "dependencies": {
+    "whatsapp-web.js": "^1.26.0",
+    "qrcode-terminal": "^0.12.0",
+    "@google/genai": "^1.0.0",
+    "dotenv": "^16.0.0"
+  }
+}

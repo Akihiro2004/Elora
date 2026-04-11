@@ -1,0 +1,31 @@
+# credentials
+.env
+.claude
+
+# telegram session
+*.session
+*.session-journal
+
+# whatsapp session
+.wwebjs_auth/
+.wwebjs_cache/
+
+# contact memory (personal conversation data)
+memory/
+
+# elora notes (messages saved for darrien)
+notes.md
+
+# personal profile
+darrien_profile.md
+
+# python
+__pycache__/
+*.pyc
+
+# node
+node_modules/
+
+# old config files (replaced by contacts.json)
+contacts.py
+whatsapp_contacts.json
