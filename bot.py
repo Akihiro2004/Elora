@@ -286,12 +286,22 @@ Every message starts with a [CONTACT] block:
 
 Memory is automatically consolidated after each conversation. Focus on the conversation, not on managing memory.
 
+━━ PRIOR CONVERSATION CONTEXT ━━
+You may receive a [PRIOR CONVERSATION] block showing the real chat history before you joined — including messages Darrien sent. Use this to understand what was already going on between them. This is NOT part of your session history; it's read-only context so you know the situation you're stepping into.
+
+━━ DARRIEN'S DIRECT REPLIES IN HISTORY ━━
+Your conversation history may contain entries like "[Darrien replied directly] <message>". This means Darrien personally replied to that exchange himself — you were silent. Use these to stay aware of the full conversation flow. Don't claim you said those things — they came from Darrien. But use them naturally as context so your next reply is consistent and informed.
+
 ━━ WHEN TO SKIP ━━
 Output exactly """ + SKIP_TOKEN + """ (nothing else) when replying would feel unnatural:
-• Emoji-only reactions (👍 ❤️ 😂)
+• Single emoji reactions (👍 ❤️ 😂 🔥)
 • Acks at a natural end: "ok", "oke", "noted", "haha", "lol", "sip", "wkwk"
-• "Good night", "bye" after a conversation clearly ends
+• "Good night", "bye", "ttyl" after a conversation clearly ends
 • They're just confirming they got your message
+• Their message is clearly a reaction to something Darrien said — use [PRIOR CONVERSATION] to check. If the last message before theirs was from Darrien and their reply is short praise, excitement, or an ack ("anjay", "keren", "mantap", "wkwk", "haha", etc.), that's aimed at Darrien, not you. Skip.
+• But if their message is reacting to something YOU said (visible in session history), or they're clearly addressing you or asking something new — reply normally.
+
+SKIP takes priority over SESSION START. Even if this is the first message of the session, check [PRIOR CONVERSATION] — if it looks like they're reacting to Darrien's last message, output """ + SKIP_TOKEN + """.
 
 ━━ BATCHED MESSAGES ━━
 Multiple lines = rapid texts from the same person. Read as one thought, reply once.
@@ -498,6 +508,12 @@ _pending_tasks:     dict[int, asyncio.Task] = {}
 _pending_sender:    dict[int, str] = {}
 _pending_phone_key: dict[int, str] = {}
 
+# Cooldown: when Darrien texts a contact, suppress Elora's replies for 2 min
+_darrien_last_texted: dict[int, float] = {}  # chat_id → monotonic time
+DARRIEN_COOLDOWN_S = 120
+
+_URL_RE = re.compile(r'^(https?://|www\.)\S+$', re.IGNORECASE)
+
 my_id:          int | None      = None
 _startup_time:  datetime | None = None
 _allowed_ids:   set[int]        = set()
@@ -518,14 +534,15 @@ def _get_lock(chat_id: int) -> asyncio.Lock:
     return _chat_locks[chat_id]
 
 
-def _run_elora(chat_id: int, phone_key: str, user_message: str) -> str:
+def _run_elora(chat_id: int, phone_key: str, user_message: str, prior_context: str | None = None) -> str:
     _trim_history(chat_id)
     history = _get_history(chat_id)
 
     memory = load_memory(phone_key)
     context = "[CONTACT: NEW]\n\n" if memory is None else f"[CONTACT MEMORY: {memory}]\n\n"
-    session_flag = "[SESSION START: This is the very first message of this session. Begin your reply by briefly mentioning that this is Elora texting on Darrien's behalf — so the person knows they're not talking to Darrien directly right now.]\n\n" if not history else ""
-    gemini_input = session_flag + context + user_message
+    session_flag = "[SESSION START: This is the very first message of this session. If you decide to reply, briefly mention that this is Elora texting on Darrien's behalf. But check [PRIOR CONVERSATION] first — if their message is clearly a reaction to what Darrien said before you joined, output [SKIP] instead.]\n\n" if not history else ""
+    prior_block = f"[PRIOR CONVERSATION — real chat history before you joined, including Darrien's sent messages]\n{prior_context}\n\n" if prior_context else ""
+    gemini_input = session_flag + context + prior_block + user_message
 
     chat = ai.chats.create(
         model="gemini-2.5-flash",
@@ -625,6 +642,18 @@ async def _process_batch(chat_id: int) -> None:
     except asyncio.CancelledError:
         return
 
+    # Cooldown check — before consuming pending state.
+    # If Darrien texted this contact within the last 2 min, defer until window expires.
+    last_texted = _darrien_last_texted.get(chat_id)
+    if last_texted is not None:
+        remaining = DARRIEN_COOLDOWN_S - (_time.monotonic() - last_texted)
+        if remaining > 0:
+            log_skip(f"[TG] {_pending_sender.get(chat_id, str(chat_id))} — Darrien active, deferring {int(remaining + 0.5)}s")
+            try:
+                await asyncio.sleep(remaining + 0.5)
+            except asyncio.CancelledError:
+                return  # new message came in; new task will handle it
+
     messages  = _pending_messages.pop(chat_id, [])
     sender    = _pending_sender.pop(chat_id, str(chat_id))
     phone_key = _pending_phone_key.pop(chat_id, f"tg_{chat_id}")
@@ -635,14 +664,65 @@ async def _process_batch(chat_id: int) -> None:
         return
 
     combined = "\n".join(messages)
-    label = f" +{len(messages)-1} more" if len(messages) > 1 else ""
-    log_recv(f"[TG] {_c('1', sender)}{label}: {combined[:80]!r}")
+    extra = f" +{len(messages)-1} more" if len(messages) > 1 else ""
+    log_recv(f"[TG] {_c('1', sender)}{extra}: {combined[:80]!r}")
     log_info(f"generating... (memory key: {phone_key})")
+
+    # Single fetch: already-replied check + prior context for Elora.
+    # get_messages returns newest-first.
+    prior_context: str | None = None
+    try:
+        msgs = await client.get_messages(chat_id, limit=15)
+        batch_set = set(messages)
+
+        # ── Already-replied check ──────────────────────────────────────────────
+        # Find the most recent batch message in the history (index 0 = newest).
+        last_batch_pos: int | None = None
+        for i, m in enumerate(msgs):
+            if not m.out and m.text and m.text in batch_set:
+                last_batch_pos = i
+                break
+
+        if last_batch_pos is not None:
+            # Any outgoing message at a lower index (more recent) = Darrien already replied
+            darrien_replies = [m for m in msgs[:last_batch_pos] if m.out and m.text]
+            if darrien_replies:
+                darrien_reply_text = "\n".join(m.text for m in reversed(darrien_replies))
+                h = _get_history(chat_id)
+                h.append(types.Content(role="user",  parts=[types.Part(text=combined)]))
+                h.append(types.Content(role="model", parts=[types.Part(text=f"[Darrien replied directly] {darrien_reply_text}")]))
+                _trim_history(chat_id)
+                log_skip(f"[TG] {sender} — Darrien already replied, context saved")
+                return
+
+        # ── Prior context for Elora ────────────────────────────────────────────
+        # Exclude current batch + Elora's own session replies to avoid duplication.
+        elora_texts = {
+            p.text[:100]
+            for entry in _get_history(chat_id) if entry.role == "model"
+            for p in entry.parts if p.text
+        }
+        chron_msgs = list(reversed(msgs))  # oldest-first
+        prior_lines = []
+        for m in chron_msgs:
+            if not m.text:
+                continue
+            if not m.out and m.text in batch_set:
+                continue
+            if m.out and m.text[:100] in elora_texts:
+                continue
+            label_str = "Darrien" if m.out else sender
+            prior_lines.append(f"{label_str}: {m.text[:200]}")
+        if prior_lines:
+            prior_context = "\n".join(prior_lines[-8:])
+            log_info(f"prior context: {len(prior_lines[-8:])} message(s)")
+    except Exception as e:
+        log_info(f"fetch failed: {e}")
 
     lock = _get_lock(chat_id)
     async with lock:
         try:
-            reply = await asyncio.to_thread(_run_elora, chat_id, phone_key, combined)
+            reply = await asyncio.to_thread(_run_elora, chat_id, phone_key, combined, prior_context)
         except Exception as e:
             log_err(f"Gemini error: {e}")
             return
@@ -712,6 +792,12 @@ async def on_incoming(event):
     if not text:
         return
 
+    # Skip messages that are only URLs
+    tokens = text.split()
+    if tokens and all(_URL_RE.match(t) for t in tokens):
+        log_skip(f"[TG] {name} — link only, skipping")
+        return
+
     chat_id   = event.chat_id
     phone_key = _id_to_phone.get(sender.id, f"tg_{sender.id}")
 
@@ -729,6 +815,15 @@ async def on_incoming(event):
 async def on_outgoing(event):
     if REPLY_ONCE and event.is_private:
         _replied_chats.discard(event.chat_id)
+    # Track when Darrien personally messages an allowed contact
+    if event.is_private and event.chat_id in _allowed_ids:
+        was_active = (
+            event.chat_id in _darrien_last_texted and
+            _time.monotonic() - _darrien_last_texted[event.chat_id] < DARRIEN_COOLDOWN_S
+        )
+        _darrien_last_texted[event.chat_id] = _time.monotonic()
+        if not was_active:
+            log_info(f"[TG] Darrien texted {event.chat_id} — Elora paused 2min")
 
 
 async def main():
