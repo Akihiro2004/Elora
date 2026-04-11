@@ -524,7 +524,8 @@ def _run_elora(chat_id: int, phone_key: str, user_message: str) -> str:
 
     memory = load_memory(phone_key)
     context = "[CONTACT: NEW]\n\n" if memory is None else f"[CONTACT MEMORY: {memory}]\n\n"
-    gemini_input = context + user_message
+    session_flag = "[SESSION START: This is the very first message of this session. Begin your reply by briefly mentioning that this is Elora texting on Darrien's behalf — so the person knows they're not talking to Darrien directly right now.]\n\n" if not history else ""
+    gemini_input = session_flag + context + user_message
 
     chat = ai.chats.create(
         model="gemini-2.5-flash",

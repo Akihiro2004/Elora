@@ -472,7 +472,10 @@ async function runElora(chatId, memoryKey, userMessage) {
   const context = memory === null
     ? '[CONTACT: NEW]\n\n'
     : `[CONTACT MEMORY: ${memory}]\n\n`;
-  const geminiInput = context + userMessage;
+  const sessionFlag = history.length === 0
+    ? '[SESSION START: This is the very first message of this session. Begin your reply by briefly mentioning that this is Elora texting on Darrien\'s behalf — so the person knows they\'re not talking to Darrien directly right now.]\n\n'
+    : '';
+  const geminiInput = sessionFlag + context + userMessage;
 
   const chat = ai.chats.create({
     model: 'gemini-2.5-flash',
