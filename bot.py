@@ -254,7 +254,7 @@ Do NOT introduce yourself as Elora or mention being an assistant — unless some
 Think before you answer. Pick the right tool for the situation.
 
 get_current_datetime
-→ Call first for ANYTHING involving time, day, schedule, today, tomorrow, besok, weekend, jam, etc.
+→ Current time is already injected in every message as [CURRENT TIME] — use that directly. Only call this tool if the conversation has been going long enough that the injected time might be stale (30+ min into a session).
 
 get_weather(city)
 → When someone asks about weather, hujan, panas, dingin, or outdoor plans. Default city: Jakarta if unspecified.
@@ -287,7 +287,7 @@ Every message starts with a [CONTACT] block:
 Memory is automatically consolidated after each conversation. Focus on the conversation, not on managing memory.
 
 ━━ PRIOR CONVERSATION CONTEXT ━━
-You may receive a [PRIOR CONVERSATION] block showing the real chat history before you joined — including messages Darrien sent. Use this to understand what was already going on between them. This is NOT part of your session history; it's read-only context so you know the situation you're stepping into.
+You may receive a [PRIOR CONVERSATION] block showing the real chat history before you joined — including messages Darrien sent. Each message has a timestamp. Use this to understand what was going on between them, but pay attention to HOW OLD the messages are. Stale context (hours or a day old) about past events — a meeting that already happened, plans for "later" that have since passed — should NOT influence your answer. If you're unsure whether something is still relevant, call get_current_datetime to check.
 
 ━━ DARRIEN'S DIRECT REPLIES IN HISTORY ━━
 Your conversation history may contain entries like "[Darrien replied directly] <message>". This means Darrien personally replied to that exchange himself — you were silent. Use these to stay aware of the full conversation flow. Don't claim you said those things — they came from Darrien. But use them naturally as context so your next reply is consistent and informed.
@@ -542,7 +542,8 @@ def _run_elora(chat_id: int, phone_key: str, user_message: str, prior_context: s
     context = "[CONTACT: NEW]\n\n" if memory is None else f"[CONTACT MEMORY: {memory}]\n\n"
     session_flag = "[SESSION START: This is the very first message of this session. If you decide to reply, briefly mention that this is Elora texting on Darrien's behalf. But check [PRIOR CONVERSATION] first — if their message is clearly a reaction to what Darrien said before you joined, output [SKIP] instead.]\n\n" if not history else ""
     prior_block = f"[PRIOR CONVERSATION — real chat history before you joined, including Darrien's sent messages]\n{prior_context}\n\n" if prior_context else ""
-    gemini_input = session_flag + context + prior_block + user_message
+    now_block = f"[CURRENT TIME]\n{get_current_datetime()}\n\n"
+    gemini_input = session_flag + context + now_block + prior_block + user_message
 
     chat = ai.chats.create(
         model="gemini-2.5-flash",
@@ -712,7 +713,9 @@ async def _process_batch(chat_id: int) -> None:
             if m.out and m.text[:100] in elora_texts:
                 continue
             label_str = "Darrien" if m.out else sender
-            prior_lines.append(f"{label_str}: {m.text[:200]}")
+            local_dt = m.date.astimezone()
+            ts = local_dt.strftime('%Y-%m-%d %H:%M')
+            prior_lines.append(f"[{ts}] {label_str}: {m.text[:200]}")
         if prior_lines:
             prior_context = "\n".join(prior_lines[-8:])
             log_info(f"prior context: {len(prior_lines[-8:])} message(s)")
