@@ -489,7 +489,7 @@ async function runElora(chatId, memoryKey, userMessage) {
   let response;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      response = await chat.sendMessage(geminiInput);
+      response = await chat.sendMessage({ message: geminiInput });
       break;
     } catch (e) {
       if (attempt < 2 && (e.message?.includes('503') || e.message?.includes('UNAVAILABLE'))) {
@@ -547,7 +547,7 @@ async function runElora(chatId, memoryKey, userMessage) {
       });
     }
 
-    response = await chat.sendMessage(toolParts);
+    response = await chat.sendMessage({ message: toolParts });
   }
 
   let text = (response.text ?? '').trim();
@@ -658,15 +658,17 @@ waClient.on('disconnected', reason => {
 });
 
 waClient.on('message', async msg => {
+  try {
   if (msg.fromMe || msg.from.endsWith('@g.us')) return;
 
   if (startupTime && msg.timestamp < startupTime) return;
 
   const contact = await msg.getContact();
-  const phoneId = contact.number ? contact.number + '@c.us' : null;
+  const rawNumber = (contact.number || '').replace(/\D/g, '');
+  const phoneId = rawNumber ? rawNumber + '@c.us' : null;
 
   const isAllowed = ALLOWED.has(msg.from) || (phoneId && ALLOWED.has(phoneId));
-  const senderName = contact.pushname || contact.number || msg.from;
+  const senderName = contact.pushname || rawNumber || msg.from;
   const preview = JSON.stringify((msg.body || '').slice(0, 50));
 
   if (isAllowed) {
@@ -680,7 +682,7 @@ waClient.on('message', async msg => {
 
   const chatId = phoneId || msg.from;
 
-  const memoryKey = contact.number || chatId.replace(/\D/g, '');
+  const memoryKey = rawNumber || chatId.replace(/\D/g, '');
 
   if (!pendingMessages.has(chatId)) pendingMessages.set(chatId, []);
   pendingMessages.get(chatId).push(msg.body);
@@ -695,6 +697,9 @@ waClient.on('message', async msg => {
     processBatch(chatId, waChat);
   }, BATCH_WINDOW_MS);
   pendingTimers.set(chatId, timer);
+  } catch (e) {
+    err(`message handler error: ${e.message}`);
+  }
 });
 
 console.log('Starting Elora on WhatsApp...');
