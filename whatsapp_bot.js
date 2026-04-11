@@ -100,12 +100,22 @@ Every message starts with a [CONTACT] block:
 
 Memory is automatically consolidated after each conversation. Focus on the conversation, not on managing memory.
 
+━━ PRIOR CONVERSATION CONTEXT ━━
+You may receive a [PRIOR CONVERSATION] block showing the real chat history before you joined — including messages Darrien sent. Use this to understand what was already going on between them. This is NOT part of your session history; it's read-only context so you know the situation you're stepping into.
+
+━━ DARRIEN'S DIRECT REPLIES IN HISTORY ━━
+Your conversation history may contain entries like "[Darrien replied directly] <message>". This means Darrien personally replied to that exchange himself — you were silent. Use these to stay aware of the full conversation flow. Don't claim you said those things — they came from Darrien. But use them naturally as context so your next reply is consistent and informed.
+
 ━━ WHEN TO SKIP ━━
 Output exactly ${SKIP_TOKEN} (nothing else) when replying would feel unnatural:
 • Single emoji reactions (👍 ❤️ 😂 🔥)
 • Acks at a natural end: "ok", "oke", "noted", "haha", "lol", "sip", "wkwk"
 • "Good night", "bye", "ttyl" after a conversation clearly ends
 • They're just confirming they got your message
+• Their message is clearly a reaction to something Darrien said — use [PRIOR CONVERSATION] to check. If the last message before theirs was from Darrien and their reply is short praise, excitement, or an ack ("anjay", "keren", "mantap", "wkwk", "haha", etc.), that's aimed at Darrien, not you. Skip.
+• But if their message is reacting to something YOU said (visible in session history), or they're clearly addressing you or asking something new — reply normally.
+
+SKIP takes priority over SESSION START. Even if this is the first message of the session, check [PRIOR CONVERSATION] — if it looks like they're reacting to Darrien's last message, output ${SKIP_TOKEN}.
 
 ━━ BATCHED MESSAGES ━━
 Sometimes you'll receive multiple lines — these are rapid consecutive texts from the same person. Read them together as one thought. Respond to the overall message, not each line individually.
@@ -452,6 +462,10 @@ const pendingMemKey = new Map();
 
 const processingChats = new Set();
 
+// Cooldown: when Darrien texts a contact, suppress Elora's replies for 2 min
+const darrienLastTexted = new Map(); // chatId → Date.now() of last sent message
+const DARRIEN_COOLDOWN_MS = 2 * 60 * 1000;
+
 function getHistory(chatId) {
   if (!chatHistories.has(chatId)) chatHistories.set(chatId, []);
   return chatHistories.get(chatId);
@@ -464,7 +478,7 @@ function trimHistory(chatId) {
   }
 }
 
-async function runElora(chatId, memoryKey, userMessage) {
+async function runElora(chatId, memoryKey, userMessage, priorContext = null) {
   trimHistory(chatId);
   const history = getHistory(chatId);
 
@@ -473,9 +487,12 @@ async function runElora(chatId, memoryKey, userMessage) {
     ? '[CONTACT: NEW]\n\n'
     : `[CONTACT MEMORY: ${memory}]\n\n`;
   const sessionFlag = history.length === 0
-    ? '[SESSION START: This is the very first message of this session. Begin your reply by briefly mentioning that this is Elora texting on Darrien\'s behalf — so the person knows they\'re not talking to Darrien directly right now.]\n\n'
+    ? '[SESSION START: This is the very first message of this session. If you decide to reply, briefly mention that this is Elora texting on Darrien\'s behalf. But check [PRIOR CONVERSATION] first — if their message is clearly a reaction to what Darrien said before you joined, output [SKIP] instead.]\n\n'
     : '';
-  const geminiInput = sessionFlag + context + userMessage;
+  const priorBlock = priorContext
+    ? `[PRIOR CONVERSATION — real chat history before you joined, including Darrien's sent messages]\n${priorContext}\n\n`
+    : '';
+  const geminiInput = sessionFlag + context + priorBlock + userMessage;
 
   const chat = ai.chats.create({
     model: 'gemini-2.5-flash',
@@ -577,6 +594,24 @@ function sleep(ms) {
 }
 
 async function processBatch(chatId, waChat) {
+  // Cooldown check — must come before consuming pending state.
+  // If Darrien texted this contact within the last 2 min, defer until the window expires.
+  const lastTexted = darrienLastTexted.get(chatId);
+  if (lastTexted) {
+    const remaining = DARRIEN_COOLDOWN_MS - (Date.now() - lastTexted);
+    if (remaining > 0) {
+      const deferSec = Math.ceil(remaining / 1000);
+      skip(`[WA] ${pendingSender.get(chatId) ?? chatId} — Darrien active, deferring ${deferSec}s`);
+      // Reschedule; a small buffer so we don't fire a hair early
+      const timer = setTimeout(() => {
+        pendingTimers.delete(chatId);
+        processBatch(chatId, waChat);
+      }, remaining + 500);
+      pendingTimers.set(chatId, timer);
+      return;
+    }
+  }
+
   const messages = pendingMessages.get(chatId) ?? [];
   const senderName = pendingSender.get(chatId) ?? chatId;
   const memoryKey = pendingMemKey.get(chatId) ?? chatId;
@@ -595,8 +630,66 @@ async function processBatch(chatId, waChat) {
   recv(`[WA] ${c('1', senderName)}${extra}: ${JSON.stringify(combined.slice(0, 80))}`);
   info('generating...');
 
+  // Single fetch: used for both the already-replied check and building prior context.
+  let priorContext = null;
   try {
-    const reply = await runElora(chatId, memoryKey, combined);
+    const fetched = await waChat.fetchMessages({ limit: 15 });
+    const batchSet = new Set(messages);
+
+    // ── Already-replied check ──────────────────────────────────────────────────
+    // Find the last position in the fetched list that belongs to the current batch.
+    // If any fromMe message exists after that position, Darrien (or Elora) already
+    // replied to these messages — don't send another reply.
+    let lastBatchIdx = -1;
+    for (let i = fetched.length - 1; i >= 0; i--) {
+      if (!fetched[i].fromMe && fetched[i].body && batchSet.has(fetched[i].body)) {
+        lastBatchIdx = i;
+        break;
+      }
+    }
+    if (lastBatchIdx !== -1) {
+      const darrienReplies = fetched.slice(lastBatchIdx + 1).filter(m => m.fromMe && m.body);
+      if (darrienReplies.length > 0) {
+        // Darrien already handled this — don't reply, but save the full exchange into
+        // Elora's history so she has complete context for the next time she does reply.
+        const darrienReplyText = darrienReplies.map(m => m.body).join('\n');
+        const h = getHistory(chatId);
+        h.push({ role: 'user',  parts: [{ text: combined }] });
+        h.push({ role: 'model', parts: [{ text: `[Darrien replied directly] ${darrienReplyText}` }] });
+        trimHistory(chatId);
+        skip(`[WA] ${senderName} — Darrien already replied, context saved`);
+        return; // finally block cleans up processingChats
+      }
+    }
+
+    // ── Prior context for Elora ────────────────────────────────────────────────
+    // Exclude the current incoming batch (already in `combined`) and Elora's own
+    // session replies (already in chat history) to avoid duplication.
+    const eloraTexts = new Set(
+      getHistory(chatId)
+        .filter(h => h.role === 'model')
+        .flatMap(h => h.parts.map(p => p.text?.slice(0, 100)))
+        .filter(Boolean)
+    );
+    const prior = fetched.filter(m => {
+      if (!m.body) return false;
+      if (!m.fromMe && batchSet.has(m.body)) return false;
+      if (m.fromMe && eloraTexts.has(m.body.slice(0, 100))) return false;
+      return true;
+    });
+    const lines = prior.slice(-8).map(m =>
+      `${m.fromMe ? 'Darrien' : senderName}: ${m.body.slice(0, 200)}`
+    );
+    if (lines.length) {
+      priorContext = lines.join('\n');
+      info(`prior context: ${lines.length} message(s)`);
+    }
+  } catch (e) {
+    info(`fetch failed: ${e.message}`);
+  }
+
+  try {
+    const reply = await runElora(chatId, memoryKey, combined, priorContext);
 
     if (!reply || reply === SKIP_TOKEN) {
       skip(`[WA] ${senderName} — no reply needed`);
@@ -657,6 +750,25 @@ waClient.on('disconnected', reason => {
   err(`WhatsApp disconnected: ${reason}`);
 });
 
+// Track when Darrien personally sends a message to a contact.
+// This starts/resets a 2-min cooldown so Elora doesn't reply while he's active.
+waClient.on('message_create', msg => {
+  try {
+    if (!msg.fromMe) return;
+    if (!msg.to || msg.to.endsWith('@g.us')) return;
+    const contactId = msg.to;
+    if (!ALLOWED.has(contactId)) return;
+    const wasActive = darrienLastTexted.has(contactId) &&
+      Date.now() - darrienLastTexted.get(contactId) < DARRIEN_COOLDOWN_MS;
+    darrienLastTexted.set(contactId, Date.now());
+    if (!wasActive) {
+      info(`[WA] Darrien texted ${contactId} — Elora paused 2min`);
+    }
+  } catch (e) {
+    err(`message_create handler error: ${e.message}`);
+  }
+});
+
 waClient.on('message', async msg => {
   try {
   if (msg.fromMe || msg.from.endsWith('@g.us')) return;
@@ -679,6 +791,13 @@ waClient.on('message', async msg => {
   }
 
   if (!msg.body) return;
+
+  const tokens = msg.body.trim().split(/\s+/).filter(Boolean);
+  const urlPattern = /^(https?:\/\/|www\.)\S+$/i;
+  if (tokens.length > 0 && tokens.every(t => urlPattern.test(t))) {
+    skip(`[WA] ${senderName} — link only, skipping`);
+    return;
+  }
 
   const chatId = phoneId || msg.from;
 
