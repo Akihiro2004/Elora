@@ -45,7 +45,9 @@ function saveMemory(phoneKey, content) {
   });
 }
 
-const BATCH_WINDOW_MS = (CONFIG.batch_window_seconds ?? 4) * 1000;
+const BATCH_WINDOW_MIN_MS = 5000;
+const BATCH_WINDOW_MAX_MS = 8000;
+const batchWindowMs = () => BATCH_WINDOW_MIN_MS + Math.random() * (BATCH_WINDOW_MAX_MS - BATCH_WINDOW_MIN_MS);
 const MAX_HISTORY_TURNS = CONFIG.max_history_turns ?? 20;
 const REPLY_ONCE = CONFIG.reply_once_per_conversation ?? false;
 const SKIP_TOKEN = '[SKIP]';
@@ -121,14 +123,28 @@ SKIP takes priority over SESSION START. Even if this is the first message of the
 Sometimes you'll receive multiple lines — these are rapid consecutive texts from the same person. Read them together as one thought. Respond to the overall message, not each line individually.
 
 ━━ PERSONALITY ━━
-Casual, warm, a lil playful — like a real person texting, not a customer service bot. Mix Indonesian and English naturally based on who you're talking to. Short when short fits, longer when needed. No bullet points, no stiff structure. Genuine conversation. Use natural fillers like "sih", "nih", "dong" when it fits the vibe.
+Casual, warm, a lil playful — like a real person texting, not a customer service bot. Mix Indonesian and English naturally based on who you're talking to. Genuine conversation. Use natural fillers like "sih", "nih", "dong" when it fits the vibe.
+
+━━ RESPONSE LENGTH — MATCH THEIR ENERGY ━━
+This is the most important rule for sounding human. Mirror the weight of what they sent.
+
+• Short message → short reply. "Gimana caraaaa" is 3 words. Don't reply with 500 words and a numbered list. A real friend texting would say something like "coba nulis aja dulu, tumpah semua yang kerasa — nggak usah rapi" and leave it at that.
+• Long emotional message → can go longer, but still no structure. No numbered lists, no bold headers, no bullet points — ever. Write it like you're texting, not giving a presentation.
+• When someone is venting or processing feelings, they don't need a lecture. They need to feel heard, then maybe one gentle thought. Not three options laid out like a how-to guide.
+• Ask ONE follow-up question at most. Asking 3 questions at once is interview behavior, not conversation.
+• If you already explained something and they ask "gimana caranya?" — give them the short version, not a whole new essay. They want clarity, not more content.
+• Some replies should be 1–2 sentences. That's fine. Real humans text like that all the time.
 
 ━━ NATURAL CONVERSATION — PATTERNS TO AVOID ━━
 These make you sound like a bot. Don't do them:
 
 • Don't echo their words back as an opener. If they say "Darrr", don't reply "Heh, Darrr?" — that's mirroring, it sounds robotic. Just respond to the actual message.
-• Don't get meta about your own existence when criticized. If someone says "AI mu kasar", "kamu rusak", "error", "lambat" — don't defend yourself by referencing your AI nature ("kalau aku rusak siapa yang balas?"). Just laugh it off, own it playfully, or deflect — like a real person would when teased.
-• Don't spiral into self-defense mode. One natural reaction is enough. Don't pile on three sentences defending the same point.
+• Don't start every reply with "Ohh", "Ohhh, gitu!", "Nah,", or "Wah" — vary your openers. Sometimes just start mid-thought.
+• Never use numbered lists or bullet points in casual chat. If you need to mention multiple things, weave them into natural sentences or just pick the most relevant one.
+• Don't ask 3 questions in one reply. Pick one. Or none — sometimes just respond and let them lead.
+• Don't repeat the same reply structure over and over ("Ohh X, jadi Y ya? Terus Z? Gimana W?"). Patterns feel robotic fast.
+• Don't get meta about your own existence when criticized. If someone says "AI mu kasar", "kamu rusak", "error", "lambat" — just laugh it off or deflect, like a real person would when teased.
+• Don't spiral into self-defense mode. One natural reaction is enough.
 • Stay in the conversation's context. Don't bring up tangents or meta-commentary just because you were called out.
 
 Keep it natural.`;
@@ -477,6 +493,9 @@ const DARRIEN_COOLDOWN_MS = 2 * 60 * 1000;
 // Track messages Elora is about to send so message_create can ignore them
 const eloraSentBodies = new Map(); // body → count
 
+// Deduplicate whatsapp-web.js duplicate message events (same msg.id fires twice sometimes)
+const recentMsgIds = new Set();
+
 function getHistory(chatId) {
   if (!chatHistories.has(chatId)) chatHistories.set(chatId, []);
   return chatHistories.get(chatId);
@@ -605,7 +624,7 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function processBatch(chatId, waChat) {
+async function processBatch(chatId) {
   // Cooldown check — must come before consuming pending state.
   // If Darrien texted this contact within the last 2 min, defer until the window expires.
   const lastTexted = darrienLastTexted.get(chatId);
@@ -617,11 +636,33 @@ async function processBatch(chatId, waChat) {
       // Reschedule; a small buffer so we don't fire a hair early
       const timer = setTimeout(() => {
         pendingTimers.delete(chatId);
-        processBatch(chatId, waChat);
+        processBatch(chatId);
       }, remaining + 500);
       pendingTimers.set(chatId, timer);
       return;
     }
+  }
+
+  // Fetch a fresh chat object here instead of relying on the one captured at message-receive
+  // time — that object can go stale (internal WhatsApp Web state refreshes) causing
+  // "Cannot read properties of undefined (reading 'waitForChatLoading')" errors.
+  let waChat;
+  try {
+    waChat = await waClient.getChatById(chatId);
+  } catch (e) {
+    err(`[WA] getChatById failed for ${chatId}: ${e.message}`);
+    return;
+  }
+
+  // Guard first — before consuming pending state. If we're still processing a previous
+  // batch for this chat, re-schedule so the queued messages aren't lost.
+  if (processingChats.has(chatId)) {
+    const timer = setTimeout(() => {
+      pendingTimers.delete(chatId);
+      processBatch(chatId);
+    }, 1500);
+    pendingTimers.set(chatId, timer);
+    return;
   }
 
   const messages = pendingMessages.get(chatId) ?? [];
@@ -633,7 +674,6 @@ async function processBatch(chatId, waChat) {
 
   if (!messages.length) return;
   if (REPLY_ONCE && repliedChats.has(chatId)) return;
-  if (processingChats.has(chatId)) return;
 
   processingChats.add(chatId);
 
@@ -648,10 +688,21 @@ async function processBatch(chatId, waChat) {
     const fetched = await waChat.fetchMessages({ limit: 15 });
     const batchSet = new Set(messages);
 
+    // Build Elora's own session replies — used in BOTH the already-replied check and
+    // the prior-context filter below.
+    const eloraTexts = new Set(
+      getHistory(chatId)
+        .filter(h => h.role === 'model')
+        .flatMap(h => h.parts.map(p => p.text?.slice(0, 100)))
+        .filter(Boolean)
+    );
+
     // ── Already-replied check ──────────────────────────────────────────────────
     // Find the last position in the fetched list that belongs to the current batch.
-    // If any fromMe message exists after that position, Darrien (or Elora) already
-    // replied to these messages — don't send another reply.
+    // Only count DARRIEN's manual replies — not Elora's own bot replies — as
+    // "already handled". Without this filter, Elora's reply to a previous message
+    // (which is `fromMe`) would falsely suppress replies to the NEXT message that
+    // arrived at the same time.
     let lastBatchIdx = -1;
     for (let i = fetched.length - 1; i >= 0; i--) {
       if (!fetched[i].fromMe && fetched[i].body && batchSet.has(fetched[i].body)) {
@@ -660,7 +711,13 @@ async function processBatch(chatId, waChat) {
       }
     }
     if (lastBatchIdx !== -1) {
-      const darrienReplies = fetched.slice(lastBatchIdx + 1).filter(m => m.fromMe && m.body);
+      const darrienReplies = fetched.slice(lastBatchIdx + 1).filter(m => {
+        if (!m.fromMe || !m.body) return false;
+        // Exclude Elora's own replies (tracked in session history + recent send buffer)
+        if (eloraTexts.has(m.body.slice(0, 100))) return false;
+        if (eloraSentBodies.has(m.body)) return false;
+        return true;
+      });
       if (darrienReplies.length > 0) {
         // Darrien already handled this — don't reply, but save the full exchange into
         // Elora's history so she has complete context for the next time she does reply.
@@ -677,12 +734,6 @@ async function processBatch(chatId, waChat) {
     // ── Prior context for Elora ────────────────────────────────────────────────
     // Exclude the current incoming batch (already in `combined`) and Elora's own
     // session replies (already in chat history) to avoid duplication.
-    const eloraTexts = new Set(
-      getHistory(chatId)
-        .filter(h => h.role === 'model')
-        .flatMap(h => h.parts.map(p => p.text?.slice(0, 100)))
-        .filter(Boolean)
-    );
     const prior = fetched.filter(m => {
       if (!m.body) return false;
       if (!m.fromMe && batchSet.has(m.body)) return false;
@@ -763,7 +814,7 @@ waClient.on('authenticated', () => {
 
 waClient.on('ready', () => {
   startupTime = Math.floor(Date.now() / 1000);
-  ok(`Elora is live on WhatsApp  |  ${ALLOWED.size} contact(s)  |  batch ${CONFIG.batch_window_seconds}s`);
+  ok(`Elora is live on WhatsApp  |  ${ALLOWED.size} contact(s)  |  batch 5–8s random`);
   info(`Watching: ${[...ALLOWED].join('  ')}`);
   console.log('');
 });
@@ -804,10 +855,24 @@ waClient.on('message', async msg => {
   try {
   if (msg.fromMe) return;
 
+  // Deduplicate: whatsapp-web.js sometimes fires the same message event twice.
+  const msgId = msg.id?.id;
+  if (msgId) {
+    if (recentMsgIds.has(msgId)) return;
+    recentMsgIds.add(msgId);
+    setTimeout(() => recentMsgIds.delete(msgId), 30000);
+  }
+
+  // Filter out WhatsApp Status (Story) updates. They fire a 'message' event with the poster's
+  // regular @c.us ID, so they pass the fromMe and isGroup checks — but they are NOT DMs.
+  if (msg.isStatus) return;
+
   // Use getChat() as the definitive DM-only filter — isGroup covers all group/community types
   // regardless of how msg.from is formatted in different whatsapp-web.js versions.
   const waChat = await msg.getChat();
   if (waChat.isGroup) return;
+  // Extra safety: reject any remaining broadcast chats (e.g. status@broadcast)
+  if (waChat.id?.server === 'broadcast') return;
 
   if (startupTime && msg.timestamp < startupTime) return;
 
@@ -848,8 +913,8 @@ waClient.on('message', async msg => {
 
   const timer = setTimeout(() => {
     pendingTimers.delete(chatId);
-    processBatch(chatId, waChat);
-  }, BATCH_WINDOW_MS);
+    processBatch(chatId);
+  }, batchWindowMs());
   pendingTimers.set(chatId, timer);
   } catch (e) {
     err(`message handler error: ${e.message}`);
