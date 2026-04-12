@@ -23,6 +23,6 @@
 
   ],
   "batch_window_seconds": 4,
-  "max_history_turns": 5,
+  "max_history_turns": 4,
   "reply_once_per_conversation": false
 }

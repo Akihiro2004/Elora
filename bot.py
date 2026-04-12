@@ -795,9 +795,9 @@ def _is_allowed(sender_id: int) -> bool:
     return sender_id in _allowed_ids
 
 
-@client.on(events.NewMessage(incoming=True))
+@client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def on_incoming(event):
-    if event.sender_id == my_id or not event.is_private:
+    if event.sender_id == my_id:
         return
     if _startup_time and event.message.date < _startup_time:
         return

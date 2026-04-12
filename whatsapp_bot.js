@@ -802,7 +802,12 @@ waClient.on('message_create', msg => {
 
 waClient.on('message', async msg => {
   try {
-  if (msg.fromMe || msg.from.endsWith('@g.us')) return;
+  if (msg.fromMe) return;
+
+  // Use getChat() as the definitive DM-only filter — isGroup covers all group/community types
+  // regardless of how msg.from is formatted in different whatsapp-web.js versions.
+  const waChat = await msg.getChat();
+  if (waChat.isGroup) return;
 
   if (startupTime && msg.timestamp < startupTime) return;
 
@@ -841,7 +846,6 @@ waClient.on('message', async msg => {
 
   if (pendingTimers.has(chatId)) clearTimeout(pendingTimers.get(chatId));
 
-  const waChat = await msg.getChat();
   const timer = setTimeout(() => {
     pendingTimers.delete(chatId);
     processBatch(chatId, waChat);
