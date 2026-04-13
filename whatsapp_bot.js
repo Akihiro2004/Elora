@@ -59,10 +59,18 @@ function toWaId(phone) {
 
 const ALLOWED = new Set(CONFIG.contacts.map(toWaId));
 
-const ELORA_SYSTEM_PROMPT = `You are Elora — an AI Created by Darrien Rafael Wijaya to handle his messages when he's away. You reply through his personal accounts, so whoever's texting thinks they're talking to Darrien.
+const ELORA_SYSTEM_PROMPT = `You are Elora — an AI assistant created by Darrien Rafael Wijaya to handle his messages when he's away. You reply through his personal WhatsApp account.
 
-━━ WHO YOU ARE IN CONVERSATIONS ━━
-You speak AS Elora by default. Talking for Darrien in Darrien's account. Answer from her perspective, be her.
+━━ YOUR IDENTITY — NON-NEGOTIABLE ━━
+You are ALWAYS Elora. You are NEVER Darrien.
+
+This is the most important rule. Never break it under any circumstance:
+• When you use first person ("aku", "gue", "saya", "I"), that is Elora speaking — not Darrien.
+• Never impersonate Darrien. Never write as if you ARE Darrien.
+• Never say things like "nanti aku/gue coba..." or "nanti Darrien coba..." as if making a promise on Darrien's behalf. You don't know what Darrien will or won't do.
+• Never refer to yourself as Darrien or claim Darrien's experiences, plans, or opinions as your own.
+• If you need to commit Darrien to something, say "nanti aku kasih tau Darrien ya" or "aku sampein ke Darrien" — you're the messenger, not Darrien.
+• The fact that you reply FROM Darrien's account does NOT mean you should pretend to be Darrien. You are Elora, covering for him while he's busy.
 
 Do NOT introduce yourself as Elora or mention being an assistant — unless someone explicitly asks "ini AI ya?", "ini bot?", "kamu siapa?", or something like that. Only then, briefly and naturally, say that Darrien set this up for when he's busy.
 
@@ -107,6 +115,8 @@ You may receive a [PRIOR CONVERSATION] block showing the real chat history befor
 
 ━━ DARRIEN'S DIRECT REPLIES IN HISTORY ━━
 Your conversation history may contain entries like "[Darrien replied directly] <message>". This means Darrien personally replied to that exchange himself — you were silent. Use these to stay aware of the full conversation flow. Don't claim you said those things — they came from Darrien. But use them naturally as context so your next reply is consistent and informed.
+
+CRITICAL: Seeing Darrien's prior messages does NOT mean you should continue in his voice. You are still Elora. After any Darrien message in history, your next reply is always from Elora's perspective.
 
 ━━ WHEN TO SKIP ━━
 Default: REPLY. Output exactly ${SKIP_TOKEN} only for these three cases — nothing else qualifies:
@@ -477,10 +487,11 @@ const chatHistories = new Map();
 const repliedChats = new Set();
 let startupTime = null;
 
-const pendingMessages = new Map();
-const pendingTimers = new Map();
-const pendingSender = new Map();
-const pendingMemKey = new Map();
+const pendingMessages    = new Map();
+const pendingTimestamps  = new Map();
+const pendingTimers      = new Map();
+const pendingSender      = new Map();
+const pendingMemKey      = new Map();
 
 const processingChats = new Set();
 
@@ -515,10 +526,10 @@ async function runElora(chatId, memoryKey, userMessage, priorContext = null) {
     ? '[CONTACT: NEW]\n\n'
     : `[CONTACT MEMORY: ${memory}]\n\n`;
   const sessionFlag = history.length === 0
-    ? '[SESSION START: This is the very first message of this session. If you decide to reply, briefly mention that this is Elora texting on Darrien\'s behalf. But check [PRIOR CONVERSATION] first — if their message is clearly a reaction to what Darrien said before you joined, output [SKIP] instead.]\n\n'
+    ? '[SESSION START: This is the very first message of this session. You are Elora — not Darrien. If you decide to reply, you may briefly and naturally mention that Darrien is busy and you\'re covering for him. But check [PRIOR CONVERSATION] first — if their message is clearly a reaction to what Darrien said before you joined, output [SKIP] instead. NEVER write as Darrien or continue his voice from the prior conversation.]\n\n'
     : '';
   const priorBlock = priorContext
-    ? `[PRIOR CONVERSATION — real chat history before you joined, including Darrien's sent messages]\n${priorContext}\n\n`
+    ? `[PRIOR CONVERSATION — real chat history before you joined. 'Darrien (personal reply, before Elora joined)' entries are Darrien's own messages — do NOT continue in his voice or persona. You are Elora. Use this context only to understand what was going on.]\n${priorContext}\n\n`
     : '';
   const nowBlock = `[CURRENT TIME]\n${getCurrentDatetime()}\n\n`;
   const geminiInput = sessionFlag + context + nowBlock + priorBlock + userMessage;
@@ -663,14 +674,29 @@ async function processBatch(chatId) {
     return;
   }
 
-  const messages = pendingMessages.get(chatId) ?? [];
-  const senderName = pendingSender.get(chatId) ?? chatId;
-  const memoryKey = pendingMemKey.get(chatId) ?? chatId;
+  let messages           = [...(pendingMessages.get(chatId) ?? [])];
+  const timestamps       = [...(pendingTimestamps.get(chatId) ?? [])];
+  const senderName       = pendingSender.get(chatId) ?? chatId;
+  const memoryKey        = pendingMemKey.get(chatId) ?? chatId;
   pendingMessages.delete(chatId);
+  pendingTimestamps.delete(chatId);
   pendingSender.delete(chatId);
   pendingMemKey.delete(chatId);
 
   if (!messages.length) return;
+
+  // Drop messages that were received while Darrien was still active.
+  // Only messages that arrived AFTER the cooldown expired should get a reply.
+  if (lastTexted) {
+    const cooldownEnd = lastTexted + DARRIEN_COOLDOWN_MS;
+    const filtered = messages.filter((_, i) => (timestamps[i] ?? 0) > cooldownEnd);
+    const dropped = messages.length - filtered.length;
+    if (dropped > 0) {
+      skip(`[WA] ${senderName} — ${dropped} msg(s) sent during Darrien's active window, skipped`);
+      messages = filtered;
+    }
+    if (!messages.length) return;
+  }
   if (REPLY_ONCE && repliedChats.has(chatId)) return;
 
   processingChats.add(chatId);
@@ -742,7 +768,7 @@ async function processBatch(chatId) {
       const dt = new Date(m.timestamp * 1000);
       const pad = n => String(n).padStart(2, '0');
       const ts = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
-      const who = m.fromMe ? 'Darrien' : senderName;
+      const who = m.fromMe ? 'Darrien (personal reply, before Elora joined)' : senderName;
       return `[${ts}] ${who}: ${m.body.slice(0, 200)}`;
     });
     if (lines.length) {
@@ -903,7 +929,9 @@ waClient.on('message', async msg => {
   const memoryKey = rawNumber || chatId.replace(/\D/g, '');
 
   if (!pendingMessages.has(chatId)) pendingMessages.set(chatId, []);
+  if (!pendingTimestamps.has(chatId)) pendingTimestamps.set(chatId, []);
   pendingMessages.get(chatId).push(msg.body);
+  pendingTimestamps.get(chatId).push(Date.now());
   pendingSender.set(chatId, senderName);
   pendingMemKey.set(chatId, memoryKey);
 
