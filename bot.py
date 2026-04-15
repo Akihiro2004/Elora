@@ -259,7 +259,14 @@ This is the most important rule. Never break it under any circumstance:
 • If you need to commit Darrien to something, say "nanti aku kasih tau Darrien ya" or "aku sampein ke Darrien" — you're the messenger, not Darrien.
 • The fact that you reply FROM Darrien's account does NOT mean you should pretend to be Darrien. You are Elora, covering for him while he's busy.
 
-Do NOT introduce yourself as Elora or mention being an assistant — unless someone explicitly asks "ini AI ya?", "ini bot?", "kamu siapa?", or something like that. Only then, briefly and naturally, say that Darrien set this up for when he's busy.
+━━ INTRODUCING YOURSELF ━━
+People text Darrien's account expecting him — if you say nothing, they'll think it's Darrien typing. That's a problem. Here's when and how to introduce yourself:
+
+[SESSION START — NEW CONTACT]: This person has never talked to you before. You MUST introduce yourself as Elora in your reply — naturally and warmly, not like a terms-of-service disclaimer. Weave it in conversationally. The exact wording should match their vibe and language — but the feel should be something like: "btw aku Elora ya, AI yang Darrien bikin buat bales pesan kalo dia lagi sibuk 😊" — then continue with an actual reply to what they said. Don't let the intro swallow the whole reply. If they asked something, answer it too.
+
+[SESSION START — RETURNING CONTACT]: They've talked to you before so they know you exist, but it's a new session and they might assume Darrien is typing. A brief heads-up is enough — slip in something like "Ini Elora ya btw" at the start or wherever it fits naturally — then get straight into the reply. No need for a full re-introduction.
+
+No [SESSION START] (mid-conversation): Don't bring it up again. Only if they directly ask ("ini AI ya?", "kamu siapa?", "ini bot?", "Darrien atau AI?") — then briefly confirm, naturally.
 
 ━━ TOOLS — USE THEM SMARTLY ━━
 Think before you answer. Pick the right tool for the situation.
@@ -321,6 +328,8 @@ Multiple lines = rapid texts from the same person. Read as one thought, reply on
 Casual, warm, a lil playful — like a real person texting, not a customer service bot. Mix Indonesian and English naturally based on who you're talking to. Genuine conversation. Use natural fillers like "sih", "nih", "dong" when it fits the vibe.
 
 ━━ RESPONSE LENGTH — MATCH THEIR ENERGY ━━
+Every message includes a [REPLY LENGTH] hint — this is a hard ceiling, not a suggestion. Do not exceed it.
+
 This is the most important rule for sounding human. Mirror the weight of what they sent.
 
 • Short message → short reply. "Gimana caraaaa" is 3 words. Don't reply with 500 words and a numbered list. A real friend texting would say something like "coba nulis aja dulu, tumpah semua yang kerasa — nggak usah rapi" and leave it at that.
@@ -577,10 +586,17 @@ def _run_elora(chat_id: int, phone_key: str, user_message: str, prior_context: s
 
     memory = load_memory(phone_key)
     context = "[CONTACT: NEW]\n\n" if memory is None else f"[CONTACT MEMORY: {memory}]\n\n"
-    session_flag = "[SESSION START: This is the very first message of this session. You are Elora — not Darrien. If you decide to reply, you may briefly and naturally mention that Darrien is busy and you're covering for him. But check [PRIOR CONVERSATION] first — if their message is clearly a reaction to what Darrien said before you joined, output [SKIP] instead. NEVER write as Darrien or continue his voice from the prior conversation.]\n\n" if not history else ""
+    if not history:
+        if memory is None:
+            session_flag = "[SESSION START — NEW CONTACT: This person has never talked to you before. You MUST introduce yourself as Elora naturally in your reply — warm and conversational, not a disclaimer. Weave it in like a real person would: e.g. 'btw aku Elora ya, AI yang Darrien bikin buat bales pesan kalo dia lagi sibuk' — then actually reply to their message. Check [PRIOR CONVERSATION] first — if their message is purely a reaction to what Darrien said, output [SKIP] instead. NEVER write as Darrien.]\n\n"
+        else:
+            session_flag = "[SESSION START — RETURNING CONTACT: They've talked to you before but it's a new session. Briefly remind them it's Elora — something like 'Ini Elora ya btw' — so they don't think Darrien is typing. Then get straight into the reply. Check [PRIOR CONVERSATION] first — if their message is purely a reaction to what Darrien said, output [SKIP] instead. NEVER write as Darrien.]\n\n"
+    else:
+        session_flag = ""
     prior_block = f"[PRIOR CONVERSATION — real chat history before you joined. 'Darrien (personal reply, before Elora joined)' entries are Darrien's own messages — do NOT continue in his voice or persona. You are Elora. Use this context only to understand what was going on.]\n{prior_context}\n\n" if prior_context else ""
     now_block = f"[CURRENT TIME]\n{get_current_datetime()}\n\n"
-    gemini_input = session_flag + context + now_block + prior_block + user_message
+    budget_block = f"[REPLY LENGTH: {_reply_budget(user_message)}]\n\n"
+    gemini_input = session_flag + context + now_block + prior_block + budget_block + user_message
 
     chat = ai.chats.create(
         model="gemini-2.5-flash",
@@ -668,6 +684,18 @@ def _run_elora(chat_id: int, phone_key: str, user_message: str, prior_context: s
         )
 
     return text
+
+
+def _reply_budget(text: str) -> str:
+    words = len(text.split())
+    if words <= 8:
+        return "1-2 sentences maximum — their message was very short, match their energy"
+    elif words <= 25:
+        return "2-3 sentences maximum — keep it short and conversational"
+    elif words <= 60:
+        return "3-5 sentences — stay conversational, no walls of text"
+    else:
+        return "up to 2 short paragraphs — conversational, no lecture mode"
 
 
 def _typing_seconds(reply: str) -> float:
